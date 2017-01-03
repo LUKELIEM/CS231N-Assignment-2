@@ -22,7 +22,7 @@ class DeepConvNet2(object):
   """
 
   def __init__(self, num_filters=[[32, 32],[64, 64]], filter_sizes=[[3, 3],[3,3]], 
-               input_dim=(3,32,32), hidden_dim=100, 
+               input_dim=(3,32,32), hidden_dim=100, xavier=False,
                num_classes=10, reg=0.0, weight_scale=1e-2, dtype=np.float32, 
                verbose=False):
     """
@@ -103,7 +103,14 @@ class DeepConvNet2(object):
                 filter_depth = num_filters[bloc][layer-1]
                 
             # Set up weights for the filters of the CONV layer
-            self.params[(bloc,layer,'W')] = weight_scale * np.random.randn(num_filters[bloc][layer], filter_depth, filter_sizes[bloc][layer], filter_sizes[bloc][layer])
+            if xavier:
+                # Xavier Initialization to deal with vanishing gradient problem (encountered when L>2)
+                n_input = num_filters[bloc][layer] * filter_sizes[bloc][layer] * filter_sizes[bloc][layer]
+                n_output = 1.0                
+                self.params[(bloc,layer,'W')] = np.sqrt(2.0 / (n_input + n_output)) * np.random.randn(num_filters[bloc][layer], filter_depth, filter_sizes[bloc][layer], filter_sizes[bloc][layer])
+            else:
+                self.params[(bloc,layer,'W')] = weight_scale * np.random.randn(num_filters[bloc][layer], filter_depth, filter_sizes[bloc][layer], filter_sizes[bloc][layer])
+                
             # The dimension of b is simply a vector of length = number of filters in the 
             # CONV layer
             self.params[(bloc,layer,'b')] = np.zeros(num_filters[bloc][layer])
@@ -120,7 +127,13 @@ class DeepConvNet2(object):
 
     # Assign weight and biases for FC layers. We treat this as a block with two FC layers.
     C, H, W = maxpool_dims[num_blocs-1]
-    self.params[(num_blocs,0,'W')] = weight_scale * np.random.randn(C*H*W, hidden_dim)
+    if xavier:
+        # Xavier Initialization to deal with vanishing gradient problem (encountered when L>2)
+        n_input = C*H*W
+        n_output = hidden_dim
+        self.params[(num_blocs,0,'W')] = np.sqrt(2.0 / (n_input + n_output)) * np.random.randn(C*H*W, hidden_dim)
+    else:
+        self.params[(num_blocs,0,'W')] = weight_scale * np.random.randn(C*H*W, hidden_dim)
     self.params[(num_blocs,0,'b')] = np.zeros(hidden_dim)
     
     self.params[(num_blocs,1,'W')] = weight_scale * np.random.randn(hidden_dim, num_classes)
@@ -152,7 +165,7 @@ class DeepConvNet2(object):
       self.params[k] = v.astype(dtype)
     
 
-  def loss(self, X, y=None, verbose=False):
+  def loss(self, X, y=None, verbose=False, debug=False):
     """
     Evaluate loss and gradient for the multi-layer convolutional network.
     
@@ -221,6 +234,8 @@ class DeepConvNet2(object):
                         print "CONV Block %d - Layer %d:" % (bloc,layer)
                         print "Conv-reLU-pool forward"                    
                         print pool_out[bloc].shape
+                        if debug:
+                            print "CONV output mean: %f  std: %f" % (np.mean(out), np.std(out))
                 else:
                     # When there is more than 1 CONV layer in the CONV block
                     out, conv_relu_cache[(bloc,layer)] = conv_relu_forward(bloc_in, W[(bloc,layer)], 
@@ -229,6 +244,8 @@ class DeepConvNet2(object):
                         print "CONV Block %d - Layer %d:" % (bloc,layer)
                         print "Conv-reLU forward"
                         print out.shape
+                        if debug:
+                            print "CONV output mean: %f  std: %f" % (np.mean(out), np.std(out))
 
             elif layer is (num_convs-1):
                 # When this is the last CONV layer in the CONV block
@@ -238,6 +255,8 @@ class DeepConvNet2(object):
                     print "CONV Block %d - Layer %d:" % (bloc,layer)
                     print "Conv-reLU-pool forward"                    
                     print pool_out[bloc].shape
+                    if debug:
+                        print "CONV output mean: %f  std: %f" % (np.mean(out), np.std(out))
             else:
                 # For all the CONV layers between the 1st and the last
                 out, conv_relu_cache[(bloc,layer)] = conv_relu_forward(out, W[(bloc,layer)], b[(bloc,layer)], conv_params[(bloc,layer)])
@@ -245,6 +264,8 @@ class DeepConvNet2(object):
                     print "CONV Block %d - Layer %d:" % (bloc,layer)
                     print "Conv-reLU forward"
                     print out.shape
+                    if debug:
+                        print "CONV output mean: %f  std: %f" % (np.mean(out), np.std(out))
                     
             reg_loss += np.sum(W[(bloc,layer)]*W[(bloc,layer)])  # Accumulate the Regulatization Losses
     
@@ -254,7 +275,9 @@ class DeepConvNet2(object):
     if verbose:
         print "FC Layer 1 output dimension:"
         print out.shape
-    
+        if debug:
+            print "FC Layer output mean: %f  std: %f" % (np.mean(out), np.std(out))    
+            
     # Forward Pass - Stage 3 - affine                                               [3]
     scores, affine_cache = affine_forward(out, W[(num_blocs,1)], b[(num_blocs,1)])  # Forward pass - affine
     reg_loss += np.sum(W[(num_blocs,1)]*W[(num_blocs,1)])  # Accumulate the Regulatization Lossed      
