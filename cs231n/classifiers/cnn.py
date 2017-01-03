@@ -169,7 +169,7 @@ class FiveLayerConvNet(object):
   channels.
   """
   
-  def __init__(self, input_dim=(3, 32, 32), num_filters=32, filter_size=7,
+  def __init__(self, input_dim=(3, 32, 32), num_filters=32, filter_size=3,
                hidden_dim=100, num_classes=10, weight_scale=1e-3, reg=0.0,
                dtype=np.float32, verbose=False, xavier=False):
     """
