@@ -402,7 +402,7 @@ def dropout_forward(x, dropout_param, verbose=False):
     # Store the dropout mask in the mask variable.                            #
     ###########################################################################
 
-    mask = (np.random.rand(*x.shape) < (1-p)) / (1-p)   # create dropout mask
+    mask = (np.random.rand(*x.shape) < (1.0-p)) / (1.0-p)   # create dropout mask
     out = x * mask     # drop
     
     if verbose:
@@ -421,6 +421,7 @@ def dropout_forward(x, dropout_param, verbose=False):
     # TODO: Implement the test phase forward pass for inverted dropout.       #
     ###########################################################################
     out = x
+    mask = None
     ###########################################################################
     #                            END OF YOUR CODE                             #
     ###########################################################################
@@ -670,7 +671,7 @@ def max_pool_backward_naive(dout, cache):
 
 
 def spatial_batchnorm_forward(x, gamma, beta, bn_param, verbose=False):
-  """
+  """  
   Computes the forward pass for spatial batch normalization.
   
   Inputs:
@@ -690,7 +691,7 @@ def spatial_batchnorm_forward(x, gamma, beta, bn_param, verbose=False):
   Returns a tuple of:
   - out: Output data, of shape (N, C, H, W)
   - cache: Values needed for the backward pass
-  """
+  """ 
   mode = bn_param['mode']
   eps = bn_param.get('eps', 1e-5)
   momentum = bn_param.get('momentum', 0.9)
@@ -703,12 +704,16 @@ def spatial_batchnorm_forward(x, gamma, beta, bn_param, verbose=False):
   if mode == 'train':
 
   #############################################################################
-  # TODO: Implement the forward pass for spatial batch normalization.         #
+  # TODO: Implement the backward pass for spatial batch normalization.        #
+  # Spatial batch normalization computes a mean and variance for each of the  #
+  # C feature channels by computing statistics over both the minibatch        #
+  # dimension N and the spatial dimensions H and W.                           #
   #                                                                           #
   # HINT: You can implement spatial batch normalization using the vanilla     #
   # version of batch normalization defined above. Your implementation should  #
   # be very short; ours is less than five lines.                              #
   #############################################################################
+    
     # Stage 1 - # x - mean(x) --> sub                            [1]
     mean = np.mean(x, axis=(0, 2, 3))
     mean = np.reshape(mean,(C,1,1))
@@ -794,11 +799,15 @@ def spatial_batchnorm_backward(dout, cache):
   - dgamma: Gradient with respect to scale parameter, of shape (C,)
   - dbeta: Gradient with respect to shift parameter, of shape (C,)
   """
+
   dx, dgamma, dbeta = None, None, None
   x, gamma, sub, stdev, dout_dgamma = cache 
   N, C, H, W = x.shape
   #############################################################################
   # TODO: Implement the backward pass for spatial batch normalization.        #
+  # Spatial batch normalization computes a mean and variance for each of the  #
+  # C feature channels by computing statistics over both the minibatch        #
+  # dimension N and the spatial dimensions H and W.                           #
   #                                                                           #
   # HINT: You can implement spatial batch normalization using the vanilla     #
   # version of batch normalization defined above. Your implementation should  #
@@ -819,7 +828,7 @@ def spatial_batchnorm_backward(dout, cache):
   dx = dsub - dmean 
 
   return dx, dgamma, dbeta
-  
+
 
 def svm_loss(x, y):
   """

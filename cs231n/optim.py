@@ -168,7 +168,7 @@ def adam(x, dx, config=None):
   v = beta2*v + (1.0-beta2)*(dx**2)
   mb = m/(1.0-beta1**t)
   vb = v/(1.0-beta2**t)   
-  next_x = x - lr * mb / (np.sqrt(vb) + eps)
+  next_x = x - lr * mb / (np.sqrt(vb + eps))
 
   
   config['m'] = m
