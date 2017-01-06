@@ -5,16 +5,18 @@ from cs231n.fast_layers import *
 from cs231n.layer_utils import *
 
  
-class DeepConvNet2(object):
+class DeepConvNet3(object):
   """
   A multi-layer convolutional network with following architecture:
   
-  {{conv-relu}x(L)-max pool}x(B)-affine-relu-affine-softmax
+  {{conv-(bn)-relu}x(L)-max pool}x(B)-{affine-(bn)-relu-(DO)}-affine-softmax
   
   - There is an arbitrary number of convolutional blocks followed by 2 FC
   layers + Softmax.
   - Each convolutional block consists of arbitrary number of conv-relu units
   followed by a max-pool unit, where 2-to-1 down-sampling takes place.
+  - Batch normalization is optional before each ReLU
+  - Dropout is optional for the FC-ReLU layer.
   
   The network operates on minibatches of data that have shape (N, C, H, W)
   consisting of N images, each with height H and width W and with C input
@@ -22,11 +24,11 @@ class DeepConvNet2(object):
   """
 
   def __init__(self, num_filters=[[32, 32],[64, 64]], filter_sizes=[[3, 3],[3,3]], 
-               input_dim=(3,32,32), hidden_dim=100, xavier=False,
-               num_classes=10, reg=0.0, weight_scale=1e-2, dtype=np.float32, 
-               verbose=False):
+               input_dim=(3,32,32), hidden_dim=100, num_classes=10, xavier=False, 
+               dropout=0, seed=None, use_batchnorm=False, reg=0.0, weight_scale=1e-2, 
+               dtype=np.float32, verbose=False):
     """
-    Initialize a new DeepConvNet_2. 
+    Initialize a new DeepConvNet3. 
     
     Inputs:
     The convolutional blocks and the conv-relu units in them are defined by the 
@@ -56,8 +58,11 @@ class DeepConvNet2(object):
     self.filter_sizes = filter_sizes    
     self.dtype = dtype
     self.params = {}
+    self.bn_params = {}
     convout_dims = {}
-    maxpool_dims = {}   
+    maxpool_dims = {}  
+    self.use_batchnorm = use_batchnorm
+    self.use_dropout = dropout > 0
 
     ############################################################################
     # TODO: Initialize weights and biases for the multi-layer convolutional    #
@@ -70,7 +75,7 @@ class DeepConvNet2(object):
     # {{conv-relu}x(L)-max pool}x(B)-affine-relu-affine-softmax
     num_blocs = len(num_filters)
     
-    # For each CONV block each containing {{conv-relu}x(L)-max pool}
+    # For each CONV block each containing {{conv-(bn)-relu}x(L)-max pool}
     for bloc in range(num_blocs):
         # Get number of CONV layers (L) in the block
         num_convs = len(num_filters[bloc])
@@ -107,13 +112,23 @@ class DeepConvNet2(object):
                 # Xavier Initialization to deal with vanishing gradient problem (encountered when L>2)
                 n_input = num_filters[bloc][layer] * filter_sizes[bloc][layer] * filter_sizes[bloc][layer]
                 n_output = 1.0                
-                self.params[(bloc,layer,'W')] = np.sqrt(2.0 / (n_input + n_output)) * np.random.randn(num_filters[bloc][layer], filter_depth, filter_sizes[bloc][layer], filter_sizes[bloc][layer])
+                self.params[(bloc,layer,'W')] = np.sqrt(2.0 / (n_input + n_output)) * \
+                            np.random.randn(num_filters[bloc][layer], filter_depth, filter_sizes[bloc][layer], \
+                            filter_sizes[bloc][layer]) 
+                # The dimension of b is simply a vector of length = number of filters in the 
+                # CONV layer
+                self.params[(bloc,layer,'b')] = np.zeros(num_filters[bloc][layer])
             else:
-                self.params[(bloc,layer,'W')] = weight_scale * np.random.randn(num_filters[bloc][layer], filter_depth, filter_sizes[bloc][layer], filter_sizes[bloc][layer])
+                self.params[(bloc,layer,'W')] = weight_scale * np.random.randn(num_filters[bloc][layer], \
+                            filter_depth, filter_sizes[bloc][layer], filter_sizes[bloc][layer])
+                # The dimension of b is simply a vector of length = number of filters in the 
+                # CONV layer
+                self.params[(bloc,layer,'b')] = np.zeros(num_filters[bloc][layer])                
                 
-            # The dimension of b is simply a vector of length = number of filters in the 
-            # CONV layer
-            self.params[(bloc,layer,'b')] = np.zeros(num_filters[bloc][layer])
+            if self.use_batchnorm:
+                self.params[(bloc,layer,'gamma')] = np.ones(num_filters[bloc][layer])
+                self.params[(bloc,layer,'beta')] = np.zeros(num_filters[bloc][layer])
+                self.bn_params[(bloc,layer)] = {'mode': 'train'}
             
             # The output of the convolution is an activation map volume whereby:
             # - the depth equals the number of filters in the CONV layer
@@ -132,12 +147,18 @@ class DeepConvNet2(object):
         n_input = C*H*W
         n_output = hidden_dim
         self.params[(num_blocs,0,'W')] = np.sqrt(2.0 / (n_input + n_output)) * np.random.randn(C*H*W, hidden_dim)
+        self.params[(num_blocs,0,'b')] = np.zeros(hidden_dim)
     else:
         self.params[(num_blocs,0,'W')] = weight_scale * np.random.randn(C*H*W, hidden_dim)
-    self.params[(num_blocs,0,'b')] = np.zeros(hidden_dim)
-    
+        self.params[(num_blocs,0,'b')] = np.zeros(hidden_dim)
+        
+    if self.use_batchnorm:
+        self.params[(num_blocs,0,'gamma')] = np.ones(hidden_dim)
+        self.params[(num_blocs,0,'beta')] = np.zeros(hidden_dim)
+        self.bn_params[(num_blocs,0)] = {'mode': 'train'}
+        
     self.params[(num_blocs,1,'W')] = weight_scale * np.random.randn(hidden_dim, num_classes)
-    self.params[(num_blocs,1,'b')] = np.zeros(num_classes)
+    self.params[(num_blocs,1,'b')] = np.zeros(num_classes)        
     
     if verbose:
         print "This outlines the architecture of the Deep CNN:"
@@ -150,16 +171,39 @@ class DeepConvNet2(object):
                 print "  W & b in CONV layer %d" % (layer+1)
                 print self.params[(bloc,layer,'W')].shape
                 print self.params[(bloc,layer,'b')].shape
+                if self.use_batchnorm:
+                    print "Gamma and Beta in CONV-ReLU layers:"
+                    print self.params[(bloc,layer,'gamma')].shape
+                    print self.params[(bloc,layer,'beta')].shape                 
                 print "CONV output dimension: %d x %d x %d" % convout_dims[bloc, layer]
             print "Maxpool dimension: %d x %d x %d" % maxpool_dims[bloc]  
             print "\n"
         print "W & b in FC layers:"
         print self.params[(num_blocs,0,'W')].shape
         print self.params[(num_blocs,0,'b')].shape   
+        if self.use_batchnorm:
+            print "Gamma and Beta in FC layers:"
+            print self.params[(num_blocs,0,'gamma')].shape
+            print self.params[(num_blocs,0,'beta')].shape         
         print self.params[(num_blocs,1,'W')].shape
         print self.params[(num_blocs,1,'b')].shape
         print "\n"
-             
+        if self.use_batchnorm:
+            print "BN parameters for CONV and FC1:"
+            print self.bn_params
+            
+    # When using dropout we need to pass a dropout_param dictionary to each
+    # dropout layer so that the layer knows the dropout probability and the mode
+    # (train / test). You can pass the same dropout_param to each dropout layer.
+    self.dropout_param = {}
+    if self.use_dropout:
+      self.dropout_param = {'mode': 'train', 'p': dropout}
+      if seed is not None:
+        self.dropout_param['seed'] = seed
+    if verbose:
+        print "dropout parameters:"
+        print self.dropout_param           
+        
     # Cast all parameters to the correct datatype
     for k, v in self.params.iteritems():
       self.params[k] = v.astype(dtype)
@@ -174,14 +218,29 @@ class DeepConvNet2(object):
     X = X.astype(self.dtype)
     W = {}
     b = {}
+    gamma={}
+    beta={}
     dW = {}
     db = {}
+    dgamma={}
+    dbeta={}
     conv_params = {}
     conv_relu_cache = {}
     conv_relu_pool_cache = {}
+    conv_bn_relu_cache = {}
+    conv_bn_relu_pool_cache = {}
     pool_out={}
     num_filters = self.num_filters
     filter_sizes = self.filter_sizes
+    
+    mode = 'test' if y is None else 'train'
+    # Set train/test mode for batchnorm params and dropout param since they
+    # behave differently during training and testing.
+    if self.dropout_param is not None:
+      self.dropout_param['mode'] = mode   
+    if self.use_batchnorm:
+      for label, bn_param in self.bn_params.iteritems():
+          bn_param['mode'] = mode
     
     # Retrieve weights and biases for CONV layers in the CONV Blocks
     num_blocs = len(num_filters)
@@ -190,6 +249,11 @@ class DeepConvNet2(object):
         for layer in range(num_convs):
             # Retrieve weights and biases for CONV layers
             W[(bloc,layer)], b[(bloc,layer)] = self.params[(bloc,layer,'W')], self.params[(bloc,layer,'b')]
+            
+            if self.use_batchnorm:
+                # Retrieve gammas and betas for CONV layers
+                gamma[(bloc,layer)], beta[(bloc,layer)] = self.params[(bloc,layer,'gamma')], self.params[(bloc,layer,'beta')]
+                
             # pass conv_param to the forward pass for the convolutional layer
             # These parameters ensures that the convolution output have the same HxW dimension
             # as the input 
@@ -202,6 +266,9 @@ class DeepConvNet2(object):
 
     # Retrieve weights and biases for FC layers
     W[(num_blocs,0)], b[(num_blocs,0)] = self.params[(num_blocs,0,'W')], self.params[(num_blocs,0,'b')]
+    if self.use_batchnorm:
+        # Retrieve gammas and betas for the FC layers
+        gamma[(num_blocs,0)], beta[(num_blocs,0)] = self.params[(num_blocs,0,'gamma')], self.params[(num_blocs,0,'beta')]    
     W[(num_blocs,1)], b[(num_blocs,1)] = self.params[(num_blocs,1,'W')], self.params[(num_blocs,1,'b')]
     
     scores = None
@@ -216,20 +283,102 @@ class DeepConvNet2(object):
     num_blocs = len(num_filters)
     if verbose:
         print "Running Forward Pass throught the DNN:"
-    for bloc in range(num_blocs):
-        num_convs = len(num_filters[bloc])
-        if bloc is 0:
-            bloc_in = X
-        else:
-            bloc_in = pool_out[bloc-1]
+    
+    if self.use_batchnorm:
+        # When batch norm is turned on
+        for bloc in range(num_blocs):
+            num_convs = len(num_filters[bloc])
+            if bloc is 0:
+                bloc_in = X
+            else:
+                bloc_in = pool_out[bloc-1]
             
-        for layer in range(num_convs):
-            if layer is 0:
-                if num_convs is 1:
-                    # When there is only 1 CONV layer in the CONV block
-                    pool_out[bloc], conv_relu_pool_cache[bloc] = conv_relu_pool_forward(bloc_in, 
+            for layer in range(num_convs):
+                if layer is 0:
+                    if num_convs is 1:
+                    # If there is only 1 layer in the block
+                        pool_out[bloc], conv_bn_relu_pool_cache[bloc] = conv_bn_relu_pool_forward(bloc_in, W[(bloc,layer)], 
+                                            b[(bloc,layer)], gamma[(bloc,layer)], beta[(bloc,layer)], 
+                                            conv_params[(bloc,layer)], pool_param, self.bn_params[(bloc,layer)])
+                        if verbose:
+                            print "CONV Block %d - Layer %d:" % (bloc,layer)
+                            print "Conv-bn-reLU-pool forward"                    
+                            print pool_out[bloc].shape
+                            if debug:
+                                print "CONV output mean: %f  std: %f" % (np.mean(out), np.std(out))
+                    else: 
+                    # If this is the first layer in the block
+                        out, conv_bn_relu_cache[(bloc,layer)] = conv_bn_relu_forward(bloc_in, W[(bloc,layer)], 
+                                            b[(bloc,layer)], gamma[(bloc,layer)], beta[(bloc,layer)], 
+                                            conv_params[(bloc,layer)], self.bn_params[(bloc,layer)])
+                        if verbose:
+                            print "CONV Block %d - Layer %d:" % (bloc,layer)
+                            print "Conv-bn-reLU forward"                    
+                            print out.shape
+                            if debug:
+                                print "CONV output mean: %f  std: %f" % (np.mean(out), np.std(out))                        
+                elif (layer is (num_convs-1)):
+                    # If this is the last layer in the block
+                    pool_out[bloc], conv_bn_relu_pool_cache[bloc] = conv_bn_relu_pool_forward(out, W[(bloc,layer)], 
+                                            b[(bloc,layer)], gamma[(bloc,layer)], beta[(bloc,layer)], 
+                                            conv_params[(bloc,layer)], pool_param, self.bn_params[(bloc,layer)])
+                    if verbose:
+                        print "CONV Block %d - Layer %d:" % (bloc,layer)
+                        print "Conv-bn-reLU-pool forward"                    
+                        print pool_out[bloc].shape
+                        if debug:
+                            print "CONV output mean: %f  std: %f" % (np.mean(out), np.std(out))                            
+                else:
+                    # For all the CONV layers between the 1st and the last
+                    out, conv_bn_relu_cache[(bloc,layer)] = conv_bn_relu_forward(out, W[(bloc,layer)], \
+                                             b[(bloc,layer)], gamma[(bloc,layer)], beta[(bloc,layer)], \
+                                             conv_params[(bloc,layer)], self.bn_params[(bloc,layer)])
+                    if verbose:
+                        print "CONV Block %d - Layer %d:" % (bloc,layer)
+                        print "Conv-bn-reLU forward"
+                        print out.shape
+                        if debug:
+                            print "CONV output mean: %f  std: %f" % (np.mean(out), np.std(out))
+                    
+                reg_loss += np.sum(W[(bloc,layer)]*W[(bloc,layer)])  # Accumulate the Regulatization Losses
+        
+    else:
+        # When batch norm is turned off
+        for bloc in range(num_blocs):
+            num_convs = len(num_filters[bloc])
+            if bloc is 0:
+                bloc_in = X
+            else:
+                bloc_in = pool_out[bloc-1]
+            
+            for layer in range(num_convs):
+                if layer is 0:
+                    if num_convs is 1:
+                        # When there is only 1 CONV layer in the CONV block
+                        pool_out[bloc], conv_relu_pool_cache[bloc] = conv_relu_pool_forward(bloc_in, 
                                                                                         W[(bloc,layer)], b[(bloc,layer)],
                                                                                         conv_params[(bloc,layer)], pool_param)
+                        if verbose:
+                            print "CONV Block %d - Layer %d:" % (bloc,layer)
+                            print "Conv-reLU-pool forward"                    
+                            print pool_out[bloc].shape
+                            if debug:
+                                print "CONV output mean: %f  std: %f" % (np.mean(out), np.std(out))
+                    else:
+                        # When there is more than 1 CONV layer in the CONV block
+                        out, conv_relu_cache[(bloc,layer)] = conv_relu_forward(bloc_in, W[(bloc,layer)], 
+                                                                           b[(bloc,layer)], conv_params[(bloc,layer)])
+                        if verbose:
+                            print "CONV Block %d - Layer %d:" % (bloc,layer)
+                            print "Conv-reLU forward"
+                            print out.shape
+                            if debug:
+                                print "CONV output mean: %f  std: %f" % (np.mean(out), np.std(out))
+
+                elif layer is (num_convs-1):
+                    # When this is the last CONV layer in the CONV block
+                    pool_out[bloc], conv_relu_pool_cache[bloc] = conv_relu_pool_forward(out, W[(bloc,layer)], b[(bloc,layer)],
+                                                                                    conv_params[(bloc,layer)], pool_param)
                     if verbose:
                         print "CONV Block %d - Layer %d:" % (bloc,layer)
                         print "Conv-reLU-pool forward"                    
@@ -237,40 +386,24 @@ class DeepConvNet2(object):
                         if debug:
                             print "CONV output mean: %f  std: %f" % (np.mean(out), np.std(out))
                 else:
-                    # When there is more than 1 CONV layer in the CONV block
-                    out, conv_relu_cache[(bloc,layer)] = conv_relu_forward(bloc_in, W[(bloc,layer)], 
-                                                                           b[(bloc,layer)], conv_params[(bloc,layer)])
+                    # For all the CONV layers between the 1st and the last
+                    out, conv_relu_cache[(bloc,layer)] = conv_relu_forward(out, W[(bloc,layer)], b[(bloc,layer)], conv_params[(bloc,layer)])
                     if verbose:
                         print "CONV Block %d - Layer %d:" % (bloc,layer)
                         print "Conv-reLU forward"
                         print out.shape
                         if debug:
                             print "CONV output mean: %f  std: %f" % (np.mean(out), np.std(out))
-
-            elif layer is (num_convs-1):
-                # When this is the last CONV layer in the CONV block
-                pool_out[bloc], conv_relu_pool_cache[bloc] = conv_relu_pool_forward(out, W[(bloc,layer)], b[(bloc,layer)],
-                                                                                    conv_params[(bloc,layer)], pool_param)
-                if verbose:
-                    print "CONV Block %d - Layer %d:" % (bloc,layer)
-                    print "Conv-reLU-pool forward"                    
-                    print pool_out[bloc].shape
-                    if debug:
-                        print "CONV output mean: %f  std: %f" % (np.mean(out), np.std(out))
-            else:
-                # For all the CONV layers between the 1st and the last
-                out, conv_relu_cache[(bloc,layer)] = conv_relu_forward(out, W[(bloc,layer)], b[(bloc,layer)], conv_params[(bloc,layer)])
-                if verbose:
-                    print "CONV Block %d - Layer %d:" % (bloc,layer)
-                    print "Conv-reLU forward"
-                    print out.shape
-                    if debug:
-                        print "CONV output mean: %f  std: %f" % (np.mean(out), np.std(out))
                     
-            reg_loss += np.sum(W[(bloc,layer)]*W[(bloc,layer)])  # Accumulate the Regulatization Losses
-    
+                reg_loss += np.sum(W[(bloc,layer)]*W[(bloc,layer)])  # Accumulate the Regulatization Losses
+
+                
     # Forward Pass - Stage 2 - affine - relu                                        [2]
-    out, affine_relu_cache = affine_relu_forward(pool_out[num_blocs-1], W[(num_blocs,0)], b[(num_blocs,0)]) 
+    if self.use_batchnorm:
+        out, affine_bn_relu_cache = affine_bn_relu_forward(pool_out[num_blocs-1], W[(num_blocs,0)], b[(num_blocs,0)],
+                                    gamma[(num_blocs,0)], beta[(num_blocs,0)], self.bn_params[(num_blocs,0)])        
+    else:
+        out, affine_relu_cache = affine_relu_forward(pool_out[num_blocs-1], W[(num_blocs,0)], b[(num_blocs,0)]) 
     reg_loss += np.sum(W[(num_blocs,0)]*W[(num_blocs,0)])  # Accumulate the Regulatization Lossed
     if verbose:
         print "FC Layer 1 output dimension:"
@@ -313,45 +446,91 @@ class DeepConvNet2(object):
     grads[(num_blocs,1,'W')] = dW[(num_blocs,1)]
     grads[(num_blocs,1,'b')] = db[(num_blocs,1)]
 
-    if verbose:
-        print "FC Layer 2 dout dimension:"
-        print dout.shape  
+    if self.use_batchnorm:  
+        # If batch normalization is turned on
+        if verbose:
+            print "FC Layer 2 dout dimension:"
+            print dout.shape  
         
-    # Backward Pass - Stage 2 - affine - relu                                        [2]
-    dout, dW[(num_blocs,0)], db[(num_blocs,0)] = affine_relu_backward(dout, affine_relu_cache)
-    dW[(num_blocs,0)] += self.reg * W[(num_blocs,0)]   # Regularization - backward pass 
-    grads[(num_blocs,0,'W')] = dW[(num_blocs,0)]
-    grads[(num_blocs,0,'b')] = db[(num_blocs,0)]   
-
-    if verbose:
-        print "FC Layer 1 dout dimension:"
-        print dout.shape 
-    
-    # Backward Pass - Stage 1 - {{conv-relu}x(L)-max pool}x(B)                       [1]
-    
-    for bloc in range(num_blocs-1,-1,-1):
-        num_convs = len(num_filters[bloc])
-        for layer in range(num_convs-1,-1,-1):        
-            if layer is (num_convs-1):
-                dout, dW[(bloc,layer)], db[(bloc,layer)] = conv_relu_pool_backward(dout, 
-                                                                                  conv_relu_pool_cache[bloc])
-                if verbose:
-                    print "CONV Block %d - Layer %d:" % (bloc,layer)
-                    print "Conv-reLU-pool backward"
-                    print dout.shape
-            else:
-                dout, dW[(bloc,layer)], db[(bloc,layer)] = conv_relu_backward(dout, 
-                                                                             conv_relu_cache[(bloc,layer)])
-                if verbose:
-                    print "CONV Block %d - Layer %d:" % (bloc,layer)
-                    print "Conv-reLU backward"
-                    print dout.shape
+        # Backward Pass - Stage 2 - affine-bn-relu                                   [2]
+        dout,dW[(num_blocs,0)],db[(num_blocs,0)],dgamma[(num_blocs,0)],dbeta[(num_blocs,0)] = affine_bn_relu_backward(dout,
+                                        affine_bn_relu_cache)
+        dW[(num_blocs,0)] += self.reg * W[(num_blocs,0)]   # Regularization - backward pass 
+        grads[(num_blocs,0,'W')] = dW[(num_blocs,0)]
+        grads[(num_blocs,0,'b')] = db[(num_blocs,0)]
+        grads[(num_blocs,0,'gamma')] = dgamma[(num_blocs,0)]
+        grads[(num_blocs,0,'beta')] = dbeta[(num_blocs,0)]
+        
+        if verbose:
+            print "FC Layer 1 dout dimension:"
+            print dout.shape 
+        
+        # Backward Pass - Stage 1 - {{conv-bn-relu}x(L)-max pool}x(B)                [1]
+        for bloc in range(num_blocs-1,-1,-1):
+            num_convs = len(num_filters[bloc])
+            for layer in range(num_convs-1,-1,-1):        
+                if layer is (num_convs-1):
+                    dout, dW[(bloc,layer)], db[(bloc,layer)],dgamma[(bloc,layer)],dbeta[(bloc,layer)] = conv_bn_relu_pool_backward(dout, 
+                                                                                  conv_bn_relu_pool_cache[bloc])
+                    if verbose:
+                        print "CONV Block %d - Layer %d:" % (bloc,layer)
+                        print "Conv-bn-reLU-pool backward"
+                        print dout.shape
+                else:
+                    dout, dW[(bloc,layer)], db[(bloc,layer)],dgamma[(bloc,layer)],dbeta[(bloc,layer)] = conv_bn_relu_backward(dout, 
+                                                                                  conv_bn_relu_cache[(bloc,layer)])
+                    if verbose:
+                        print "CONV Block %d - Layer %d:" % (bloc,layer)
+                        print "Conv-bn-reLU backward"
+                        print dout.shape
                     
-            dW[(bloc,layer)] += self.reg * W[(bloc,layer)]   # Regularization - backward pass 
+                dW[(bloc,layer)] += self.reg * W[(bloc,layer)]   # Regularization - backward pass 
             
-            # Store the gradients
-            grads[(bloc,layer,'W')] = dW[(bloc,layer)]   
-            grads[(bloc,layer,'b')] = db[(bloc,layer)]
+                # Store the gradients
+                grads[(bloc,layer,'W')] = dW[(bloc,layer)]   
+                grads[(bloc,layer,'b')] = db[(bloc,layer)] 
+                grads[(bloc,layer,'gamma')] = dgamma[(bloc,layer)]
+                grads[(bloc,layer,'beta')] = dbeta[(bloc,layer)]                
+    else:
+        # If batch normalization is turned off
+        if verbose:
+            print "FC Layer 2 dout dimension:"
+            print dout.shape  
+        
+        # Backward Pass - Stage 2 - affine - relu                                        [2]
+        dout, dW[(num_blocs,0)], db[(num_blocs,0)] = affine_relu_backward(dout, affine_relu_cache)
+        dW[(num_blocs,0)] += self.reg * W[(num_blocs,0)]   # Regularization - backward pass 
+        grads[(num_blocs,0,'W')] = dW[(num_blocs,0)]
+        grads[(num_blocs,0,'b')] = db[(num_blocs,0)]   
+
+        if verbose:
+            print "FC Layer 1 dout dimension:"
+            print dout.shape 
+        
+        # Backward Pass - Stage 1 - {{conv-relu}x(L)-max pool}x(B)                       [1]
+        for bloc in range(num_blocs-1,-1,-1):
+            num_convs = len(num_filters[bloc])
+            for layer in range(num_convs-1,-1,-1):        
+                if layer is (num_convs-1):
+                    dout, dW[(bloc,layer)], db[(bloc,layer)] = conv_relu_pool_backward(dout, 
+                                                                                  conv_relu_pool_cache[bloc])
+                    if verbose:
+                        print "CONV Block %d - Layer %d:" % (bloc,layer)
+                        print "Conv-reLU-pool backward"
+                        print dout.shape
+                else:
+                    dout, dW[(bloc,layer)], db[(bloc,layer)] = conv_relu_backward(dout, 
+                                                                             conv_relu_cache[(bloc,layer)])
+                    if verbose:
+                        print "CONV Block %d - Layer %d:" % (bloc,layer)
+                        print "Conv-reLU backward"
+                        print dout.shape
+                    
+                dW[(bloc,layer)] += self.reg * W[(bloc,layer)]   # Regularization - backward pass 
+            
+                # Store the gradients
+                grads[(bloc,layer,'W')] = dW[(bloc,layer)]   
+                grads[(bloc,layer,'b')] = db[(bloc,layer)]
         
     ############################################################################
     #                             END OF YOUR CODE                             #
