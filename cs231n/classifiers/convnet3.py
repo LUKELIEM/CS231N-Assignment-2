@@ -279,11 +279,15 @@ class DeepConvNet3(object):
     # variable.                                                                #
     ############################################################################
 
-    # Forward Pass - Stage 1 - {{conv-relu}x(L)-max pool}x(B)                       [1]
+    # Forward Pass - Stage 1 - {{conv-(bn)-relu}x(L)-max pool}x(B)           [1]
     num_blocs = len(num_filters)
     if verbose:
         print "Running Forward Pass throught the DNN:"
     
+    ############################################################################
+    # There are two major branches in our code here related to batch norm:     #
+    #   - The first branch places a batch norm layer before every ReLU         #
+    ############################################################################    
     if self.use_batchnorm:
         # When batch norm is turned on
         for bloc in range(num_blocs):
@@ -341,7 +345,9 @@ class DeepConvNet3(object):
                             print "CONV output mean: %f  std: %f" % (np.mean(out), np.std(out))
                     
                 reg_loss += np.sum(W[(bloc,layer)]*W[(bloc,layer)])  # Accumulate the Regulatization Losses
-        
+    ############################################################################
+    # The second branch simply omits the batch norm layer.                     #
+    ############################################################################        
     else:
         # When batch norm is turned off
         for bloc in range(num_blocs):
@@ -397,6 +403,11 @@ class DeepConvNet3(object):
                     
                 reg_loss += np.sum(W[(bloc,layer)]*W[(bloc,layer)])  # Accumulate the Regulatization Losses
 
+    ############################################################################
+    # At this point, we are done with the forward pass of the convolutional    #
+    # blocks defined by {{conv-(bn)-relu}x(L)-max pool}x(B). We next move onto #
+    # the 2 FC layers.                                                         #
+    ############################################################################        
                 
     # Forward Pass - Stage 2 - affine - relu                                        [2]
     if self.use_batchnorm:
@@ -419,14 +430,13 @@ class DeepConvNet3(object):
         print scores.shape 
     
     ############################################################################
-    #                             END OF YOUR CODE                             #
+    #                             END OF FORWARD PASS CODE                     #
     ############################################################################
     
     if y is None:
       return scores
     
     loss, grads = 0, {}
-    
 
     ############################################################################
     # TODO: Implement the backward pass for the three-layer convolutional net, #
