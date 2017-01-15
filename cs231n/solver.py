@@ -139,6 +139,7 @@ class Solver(object):
     self.epoch = 0
     self.best_val_acc = 0
     self.best_params = {}
+    self.best_bn_params = {}
     self.loss_history = []
     self.train_acc_history = []
     self.val_acc_history = []
@@ -214,7 +215,6 @@ class Solver(object):
 
     return acc
 
-
   def train(self):
     """
     Run optimization to train the model.
@@ -260,7 +260,61 @@ class Solver(object):
           self.best_params = {}
           for k, v in self.model.params.iteritems():
             self.best_params[k] = v.copy()
-
+            
     # At the end of training swap the best params into the model
     self.model.params = self.best_params
 
+  def train_bn(self):
+    """
+    Run optimization to train the model.
+    """
+    num_train = self.X_train.shape[0]
+    iterations_per_epoch = max(num_train / self.batch_size, 1)
+    num_iterations = self.num_epochs * iterations_per_epoch
+
+    for t in xrange(num_iterations):
+      self._step()
+
+      # Maybe print training loss
+      if self.verbose and t % self.print_every == 0:
+        print '(Iteration %d / %d) loss: %f' % (
+               t + 1, num_iterations, self.loss_history[-1])
+
+      # At the end of every epoch, increment the epoch counter and decay the
+      # learning rate.
+      epoch_end = (t + 1) % iterations_per_epoch == 0
+      if epoch_end:
+        self.epoch += 1
+        for k in self.optim_configs:
+          self.optim_configs[k]['learning_rate'] *= self.lr_decay
+
+      # Check train and val accuracy on the first iteration, the last
+      # iteration, and at the end of each epoch.
+      first_it = (t == 0)
+      last_it = (t == num_iterations + 1)
+      if first_it or last_it or epoch_end:
+        train_acc = self.check_accuracy(self.X_train, self.y_train,
+                                        num_samples=1000)
+        val_acc = self.check_accuracy(self.X_val, self.y_val)
+        self.train_acc_history.append(train_acc)
+        self.val_acc_history.append(val_acc)
+
+        if self.verbose:
+          print '(Epoch %d / %d) train acc: %f; val_acc: %f' % (
+                 self.epoch, self.num_epochs, train_acc, val_acc)
+
+        # Keep track of the best model
+        if val_acc > self.best_val_acc:
+          self.best_val_acc = val_acc
+          self.best_params = {}
+          for k, v in self.model.params.iteritems():
+            self.best_params[k] = v.copy()
+            
+          # ALso keep track of batch norm parameters  
+          self.best_bn_params = {}  
+          for k, v in self.model.bn_params.iteritems():
+            self.best_bn_params[k] = v.copy()
+            
+    # At the end of training swap the best params (batch norm as well) into the model
+    self.model.params = self.best_params
+    self.model.bn_params = self.best_bn_params
